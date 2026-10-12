@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>收付通实验台 · 本地联调控制台</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23147b61'/%3E%3Cpath d='M8 11h16v12H8zm2-3h10v3H10' fill='none' stroke='white' stroke-width='2'/%3E%3Cpath d='M21 16h3v3h-3' stroke='white' stroke-width='2'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="/console-assets/styles.css" />
+    <script type="module" src="/console-assets/app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#content">跳到操作区</a>
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="收付通实验台首页">
+        <span class="brand-mark" aria-hidden="true"
+          ><svg viewBox="0 0 24 24">
+            <path d="M4 7h16v13H4zM6 4h11v3M16 12h4v4h-4z" /></svg
+        ></span>
+        <span><strong>收付通实验台</strong><small>PAYMENT SANDBOX</small></span>
+      </a>
+      <div class="sidebar-caption">工作空间</div>
+      <nav id="app-nav" aria-label="控制台导航">
+        <button
+          class="nav-item active"
+          type="button"
+          data-view="overview"
+          aria-current="page"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z" /></svg
+          ><span>联调总览</span>
+        </button>
+        <button class="nav-item" type="button" data-view="scenarios">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M9 3h6M10 3v6L4 19v2h16v-2L14 9V3M8 14h8" /></svg
+          ><span>场景模拟</span>
+        </button>
+        <button class="nav-item" type="button" data-view="workbench">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m8 6-6 6 6 6m8-12 6 6-6 6m-3-15-2 18" /></svg
+          ><span>接口工作台</span><span class="nav-count">74</span>
+        </button>
+        <button class="nav-item" type="button" data-view="records">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 3h14v18H5zM8 8h8M8 12h8M8 16h5" /></svg
+          ><span>业务记录</span>
+        </button>
+        <button class="nav-item" type="button" data-view="notifications">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M6 8a6 6 0 0 1 12 0v6l2 3H4l2-3zm4 12h4" /></svg
+          ><span>回调与日志</span>
+        </button>
+        <button class="nav-item" type="button" data-view="settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 5h16M4 12h16M4 19h16M8 2v6m8 1v6m-6 1v6" /></svg
+          ><span>环境与设置</span>
+        </button>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="local-label">
+          <span class="local-dot"></span> 本地模拟环境
+        </div>
+        <p>控制测试数据与状态<br />观察每一次资金流转</p>
+        <span class="sidebar-version">微信支付 APIv3 · 联调专用</span>
+      </div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar">
+        <div class="workspace-label">
+          <span class="workspace-icon" aria-hidden="true">⌘</span> 平台收付通
+          <span class="breadcrumb-separator">/</span> 开发测试
+        </div>
+        <div class="topbar-actions">
+          <span class="connection"
+            ><span id="status-indicator" class="status-dot pending"></span
+            ><span id="status-label">正在连接服务</span></span
+          >
+          <label class="auto-refresh"
+            ><input id="auto-refresh" type="checkbox" checked /> 自动刷新</label
+          >
+          <button
+            id="refresh-button"
+            class="button small"
+            type="button"
+            title="刷新当前服务数据"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 13 3M5 15a8 8 0 0 0 13 3"
+              /></svg
+            >刷新
+          </button>
+        </div>
+      </header>
+      <main class="main">
+        <div class="page-heading">
+          <div>
+            <div class="eyebrow">LOCAL DEVELOPMENT</div>
+            <h1 id="view-title">联调总览</h1>
+            <p id="view-subtitle">从一笔支付开始，验证完整资金链路。</p>
+          </div>
+          <span class="environment-pill"
+            ><span class="local-dot"></span> 本地工作空间</span
+          >
+        </div>
+        <div id="content" tabindex="-1">
+          <div class="panel loading">
+            <span class="spinner" aria-hidden="true"></span>
+            <p>正在读取模拟服务状态…</p>
+          </div>
+        </div>
+        <noscript
+          ><div class="callout error">
+            请启用 JavaScript，以使用场景模拟和接口工作台。
+          </div></noscript
+        >
+        <footer class="workspace-footer">
+          <span>收付通实验台</span
+          ><span>所有金额按分存储 · 时间采用北京时间</span>
+        </footer>
+      </main>
+    </div>
+    <div
+      id="toast-region"
+      class="toast-region"
+      aria-live="polite"
+      aria-atomic="false"
+    ></div>
+  </body>
+</html>

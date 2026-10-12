@@ -1,0 +1,12 @@
+node_modules/
+dist/
+data/
+coverage/
+.git/
+.agents/
+.codex/
+.aws/
+.env*
+
+# 官方下载文档保留原始内容及 SHA-256 校验值。
+平台收付通-电商交易解决方案/

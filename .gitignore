@@ -14,6 +14,12 @@ node_modules/
 # env
 .env
 .env.production
+.env.local
+
+# mock state and local test credentials
+data/
+dist/
+coverage/
 
 # logs
 logs/
@@ -26,4 +32,3 @@ lerna-debug.log*
 
 # misc
 .DS_Store
-平台收付通-电商交易解决方案/

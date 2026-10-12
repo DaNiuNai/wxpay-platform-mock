@@ -1,0 +1,15 @@
+{
+  "host": "127.0.0.1",
+  "port": 3000,
+  "baseUrl": "http://127.0.0.1:3000",
+  "spMchid": "1900000100",
+  "spAppid": "wx_mock_platform",
+  "subMchid": "1900000101",
+  "strict": false,
+  "autoPay": false,
+  "autoComplete": true,
+  "apiV3Key": "0123456789abcdef0123456789abcdef",
+  "serviceNotifyUrl": "",
+  "callbackTimeoutMs": 5000,
+  "callbackRetryMs": [1000, 5000, 15000, 30000, 60000]
+}
