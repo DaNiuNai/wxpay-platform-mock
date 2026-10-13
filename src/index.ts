@@ -39,8 +39,7 @@ const server = serve(
     ),
 )
 const shutdown = () => {
-  instance.close()
-  server.close()
+  server.close(() => instance.close())
 }
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)

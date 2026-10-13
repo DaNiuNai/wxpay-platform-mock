@@ -13,6 +13,7 @@ import {
   isConsoleProxy,
   registerConsole,
 } from './console.js'
+import { registerDatabase } from './database.js'
 import type { MockConfig, Order } from './types.js'
 import type { Notification } from './core.js'
 
@@ -41,7 +42,12 @@ export function createApp(options: AppOptions = {}) {
     throw new Error('callbackRetryMs 必须为非负整数数组')
   const app = new Hono({ strict: false })
   const store = new Store(
-    options.dataDir ? join(options.dataDir, 'state.json') : undefined,
+    options.dataDir ? join(options.dataDir, 'state.sqlite') : undefined,
+    {
+      legacyFile: options.dataDir
+        ? join(options.dataDir, 'state.json')
+        : undefined,
+    },
   )
   const crypto = new CryptoService(
     config.apiV3Key,
@@ -116,8 +122,11 @@ export function createApp(options: AppOptions = {}) {
   freshStore.set('meta', 'seeded', true)
   registerMerchants(freshRuntime)
   const initial = freshStore.snapshot()
+  freshStore.close()
+  store.save()
 
   registerConsole(runtime)
+  registerDatabase(runtime)
   runtime.route('GET', '/mock/info', () => ({
     name: '平台收付通联调模拟服务',
     mode: config.strict ? 'strict' : 'loose',
@@ -371,7 +380,8 @@ export function createApp(options: AppOptions = {}) {
     runtime,
     close: () => {
       if (timer) clearInterval(timer)
-      store.save()
+      runtime.stopCallbacks()
+      store.close()
     },
   }
 }

@@ -33,12 +33,28 @@ const state = {
   notificationFilter: 'ALL',
   lastResponse: null,
   flow: { running: false, stopped: false, steps: [], result: null },
+  database: {
+    info: null,
+    tables: [],
+    table: 'orders',
+    search: '',
+    searchInput: '',
+    page: 1,
+    pageSize: 25,
+    items: [],
+    total: 0,
+    loading: false,
+    sequence: 0,
+    searchTimer: null,
+    error: null,
+  },
 }
 const viewInfo = {
   overview: ['运行总览', '查看本地模拟服务的交易状态、资金和回调。'],
   scenarios: ['模拟测试', '选择业务场景，修改参数并推动状态流转。'],
   workbench: ['API 工作台', '浏览全部接口，编辑请求并查看完整应答。'],
   records: ['业务数据', '查询订单、退款和申请单，对记录执行模拟操作。'],
+  database: ['数据库', '查看 SQLite 存储，搜索和管理测试记录。'],
   notifications: ['回调联调', '跟踪加密通知、重试结果和本地接收器解密内容。'],
   settings: ['联调设置', '调整模拟行为、测试余额和故障注入。'],
 }
@@ -178,8 +194,11 @@ async function request(path, options = {}) {
     body = text
   }
   if (!response.ok)
-    throw new Error(
-      body?.message ?? `HTTP ${response.status} ${response.statusText}`,
+    throw Object.assign(
+      new Error(
+        body?.message ?? `HTTP ${response.status} ${response.statusText}`,
+      ),
+      { status: response.status, code: body?.code },
     )
   return body
 }
@@ -275,6 +294,7 @@ async function refresh(initial = false) {
     else if (state.view === 'records') renderRecordRows()
     else if (state.view === 'notifications') renderNotificationRows()
     else if (state.view === 'settings') renderSettingsStatus()
+    else if (state.view === 'database') await loadDatabase()
   } catch (error) {
     setStatus(false)
     if (initial)
@@ -316,6 +336,7 @@ function render() {
   if (state.view === 'scenarios') renderScenarios()
   if (state.view === 'workbench') renderWorkbench()
   if (state.view === 'records') renderRecords()
+  if (state.view === 'database') renderDatabase()
   if (state.view === 'notifications') renderNotifications()
   if (state.view === 'settings') renderSettings()
 }
@@ -1591,6 +1612,390 @@ function renderNotificationRows() {
     : empty('本地接收器还没有收到通知。通知发送后，解密结果会出现在这里。')
 }
 
+const databaseTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
+  timeZone: 'Asia/Shanghai',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hourCycle: 'h23',
+})
+function databaseTime(timestamp) {
+  const date = new Date(timestamp)
+  return Number.isNaN(date.getTime())
+    ? '—'
+    : databaseTimeFormatter.format(date).replaceAll('/', '-')
+}
+function databaseTable(name = state.database.table) {
+  return state.database.tables.find((table) => table.name === name)
+}
+function databasePath(table, resource, query = {}) {
+  return buildPath(
+    `/mock/database/${encodeURIComponent(table)}/${resource}`,
+    {},
+    query,
+  )
+}
+function databaseEditable(table) {
+  if (!databaseTable(table)?.editable)
+    throw new Error('此数据表只允许查看，不能直接修改内部记录。')
+}
+function renderDatabase() {
+  const database = state.database
+  content.innerHTML = `<div id="database-info"></div>
+    <p class="callout">直接修改测试记录不自动计算资金、不推进业务状态，也不触发回调。常规支付、退款和审核操作请使用“场景模拟”。</p>
+    ${panel('SQLite 测试记录', `<form id="database-query-form" class="database-toolbar"><div class="database-filters">${field('database-table', '数据表', database.table, { type: 'select', options: database.tables.map((table) => ({ value: table.name, label: `${table.label} · ${table.count}` })) })}${field('database-search', '关键字搜索', database.searchInput, { placeholder: '存储键或 JSON 内容中的关键字' })}${field('database-page-size', '每页记录', String(database.pageSize), { type: 'select', options: ['25', '50', '100'] })}</div><div class="actions"><button type="submit" class="button">查询</button>${button('清空搜索', 'database-search-reset')}${button('新增记录', 'database-create', 'id="database-create" disabled', 'primary')}</div></form><p id="database-table-note" class="muted"></p><div id="database-results" aria-live="polite"></div><div id="database-pagination" class="database-pagination"></div>`)} `
+  renderDatabaseInfo()
+  renderDatabaseControls()
+  renderDatabaseRows()
+  loadDatabase().catch(() => {})
+}
+function renderDatabaseInfo() {
+  const target = $('#database-info'),
+    info = state.database.info
+  if (!target) return
+  if (!info) {
+    target.innerHTML = '<p class="muted">正在读取数据库信息…</p>'
+    return
+  }
+  target.innerHTML = `<div class="stat-grid"><div class="stat-card"><span class="muted">存储引擎</span><strong class="metric-value">SQLite</strong><small>${h(info.sqliteVersion)} · ${h(info.journalMode)}</small></div><div class="stat-card"><span class="muted">存储方式</span><strong class="metric-value">${info.mode === 'memory' ? '内存' : '本地文件'}</strong><small>${info.mode === 'memory' ? '重启后清空数据' : '重启后保留数据'}</small></div><div class="stat-card"><span class="muted">记录总数</span><strong class="metric-value">${h(info.recordCount)}</strong><small>${state.database.tables.length} 个数据表 · 结构版本 ${h(info.schemaVersion)}</small></div><div class="stat-card database-file"><span class="muted">数据库文件</span><code>${h(info.path ?? ':memory:')}</code><small>${info.legacyImported ? '已迁移旧 JSON 数据' : 'SQLite 存储已启用'}</small></div></div>`
+}
+function renderDatabaseControls() {
+  const database = state.database,
+    table = databaseTable(),
+    picker = $('#database-table')
+  if (!picker) return
+  picker.innerHTML = database.tables
+    .map(
+      (item) =>
+        `<option value="${h(item.name)}" ${item.name === database.table ? 'selected' : ''}>${h(item.label)} · ${h(item.count)}</option>`,
+    )
+    .join('')
+  picker.value = database.table
+  $('#database-create').disabled = !table?.editable
+  $('#database-table-note').innerHTML = table
+    ? `<code>${h(table.name)}</code> · ${h(table.label)} · ${table.editable ? '<span class="badge success">可编辑测试数据</span>' : '<span class="badge">只读内部数据</span>'}`
+    : '正在读取数据表…'
+}
+function renderDatabaseRows() {
+  const target = $('#database-results')
+  if (!target) return
+  const database = state.database,
+    table = databaseTable()
+  if (database.error) {
+    target.innerHTML = `<p class="callout error">${h(database.error)}</p>${button('重新加载', 'database-reload')}`
+    $('#database-pagination').innerHTML = ''
+    return
+  }
+  const summary = `<p class="muted database-result-summary">${database.loading ? '正在查询… · ' : ''}匹配 ${h(database.total)} 条记录${database.search ? ` · 关键字：${h(database.search)}` : ''}</p>`
+  target.innerHTML =
+    summary +
+    (database.items.length
+      ? `<div class="table-wrap"><table class="data-table database-data-table"><thead><tr><th>存储键</th><th>JSON 预览</th><th>版本</th><th>最后更新（北京时间）</th><th>操作</th></tr></thead><tbody>${database.items
+          .map((record) => {
+            const text = JSON.stringify(record.value)
+            const attributes = `data-key="${h(record.key)}"`
+            return `<tr><td><code>${h(record.key)}</code></td><td><code class="database-json-preview">${h(text.length > 220 ? `${text.slice(0, 220)}…` : text)}</code></td><td>${h(record.revision)}</td><td class="time-cell">${h(databaseTime(record.updated_at))}</td><td class="table-actions">${button('详情', 'database-detail', attributes, 'small')}${table?.editable ? `${button('编辑', 'database-edit', attributes, 'small')}${button('删除', 'database-delete', attributes, 'small danger')}` : '<span class="muted">只读</span>'}</td></tr>`
+          })
+          .join('')}</tbody></table></div>`
+      : empty(
+          database.loading
+            ? '正在读取数据库记录…'
+            : '没有匹配记录。调整搜索条件，或在可编辑数据表中新增测试记录。',
+        ))
+  const pages = Math.max(1, Math.ceil(database.total / database.pageSize))
+  $('#database-pagination').innerHTML =
+    `<span class="muted">第 ${h(database.page)} / ${h(pages)} 页 · 每页 ${h(database.pageSize)} 条</span><div class="actions">${button('上一页', 'database-page', `data-page="${database.page - 1}" ${database.page <= 1 || database.loading ? 'disabled' : ''}`)}${button('下一页', 'database-page', `data-page="${database.page + 1}" ${database.page >= pages || database.loading ? 'disabled' : ''}`)}</div>`
+}
+async function loadDatabase({ metadata = true } = {}) {
+  const database = state.database,
+    sequence = ++database.sequence
+  database.loading = true
+  database.error = null
+  if (state.view === 'database') renderDatabaseRows()
+  try {
+    if (metadata || !database.info) {
+      const result = await request('/mock/database')
+      if (sequence !== database.sequence) return
+      database.info = result.info
+      database.tables = result.tables
+      if (!databaseTable())
+        database.table =
+          result.tables.find((table) => table.editable)?.name ??
+          result.tables[0]?.name ??
+          ''
+      if (state.view === 'database') {
+        renderDatabaseInfo()
+        renderDatabaseControls()
+      }
+    }
+    if (!database.table) {
+      database.items = []
+      database.total = 0
+      return
+    }
+    const table = database.table,
+      page = database.page,
+      pageSize = database.pageSize,
+      search = database.search
+    const result = await request(
+      databasePath(table, 'records', { search, page, pageSize }),
+    )
+    if (sequence !== database.sequence) return
+    const pages = Math.max(1, Math.ceil(result.total / pageSize))
+    if (page > pages) {
+      database.page = pages
+      return await loadDatabase({ metadata: false })
+    }
+    database.items = result.items
+    database.total = result.total
+    database.page = result.page
+    database.pageSize = result.pageSize
+  } catch (error) {
+    if (sequence !== database.sequence) return
+    database.error = error.message
+    throw error
+  } finally {
+    if (sequence === database.sequence) {
+      database.loading = false
+      if (state.view === 'database') renderDatabaseRows()
+    }
+  }
+}
+async function searchDatabase() {
+  const database = state.database
+  clearTimeout(database.searchTimer)
+  database.search = database.searchInput
+  database.page = 1
+  await loadDatabase({ metadata: false })
+}
+async function databaseMutationRefresh() {
+  const [snapshot] = await Promise.all([request('/mock/state'), loadDatabase()])
+  state.snapshot = snapshot
+}
+function databaseTemplate(table) {
+  const now = new Date().toISOString(),
+    suffix = Date.now(),
+    subMchid = state.config.subMchid
+  if (table === 'accounts')
+    return {
+      key: '1900000200:BASIC',
+      value: {
+        mchid: '1900000200',
+        account_type: 'BASIC',
+        available: 100000,
+        frozen: 0,
+      },
+    }
+  if (table === 'merchants')
+    return {
+      key: '1900000200',
+      value: {
+        sub_mchid: '1900000200',
+        sp_mchid: state.config.spMchid,
+        merchant_state: 'NORMAL',
+        organization_type: '2',
+        cert_number: 'MOCK1900000200',
+        merchant_shortname: '新增联调测试商户',
+        merchant_name: '新增联调测试有限公司',
+        legal_person: '张三',
+        sign_time: now,
+      },
+    }
+  if (table === 'orders') {
+    const number = `DB${suffix}`
+    return {
+      key: `${subMchid}:${number}`,
+      value: {
+        sp_appid: state.config.spAppid,
+        sp_mchid: state.config.spMchid,
+        sub_mchid: subMchid,
+        out_trade_no: number,
+        transaction_id: `mock_db_tx_${suffix}`,
+        prepay_id: `mock_db_prepay_${suffix}`,
+        trade_type: 'NATIVE',
+        trade_state: 'NOTPAY',
+        description: '数据库手工测试订单',
+        amount: { total: 1000, currency: 'CNY' },
+        payer: {},
+        notify_url: '',
+        settle_info: { profit_sharing: false },
+        create_time: now,
+        time_expire: new Date(Date.now() + 2 * 3600000).toISOString(),
+        refunded: 0,
+        remaining: 1000,
+        sharing_finished: false,
+      },
+    }
+  }
+  const existing = state.database.items[0]
+  return { key: '', value: existing ? structuredClone(existing.value) : {} }
+}
+async function databaseRecord(table, key) {
+  return request(databasePath(table, 'record', { key }))
+}
+async function databaseDetail(key) {
+  const table = state.database.table,
+    record = await databaseRecord(table, key)
+  const dialog = showDialog(
+    '数据库记录详情',
+    `<dl class="detail-list"><div><dt>数据表</dt><dd>${h(databaseTable(table)?.label ?? table)} <code>${h(table)}</code></dd></div><div><dt>存储键</dt><dd><code>${h(record.key)}</code></dd></div><div><dt>版本 / 创建时间（北京时间）</dt><dd>${h(record.revision)} / ${h(databaseTime(record.created_at))}</dd></div><div><dt>最后更新（北京时间）</dt><dd>${h(databaseTime(record.updated_at))}</dd></div></dl>${jsonBlock(record.value)}`,
+    '<button type="button" class="button" id="database-detail-copy">复制 JSON</button>' +
+      (databaseTable(table)?.editable
+        ? '<button type="button" class="button primary" id="database-detail-edit">编辑记录</button>'
+        : ''),
+  )
+  $('#database-detail-copy', dialog).addEventListener('click', () =>
+    busy($('#database-detail-copy', dialog), () =>
+      copy(jsonText(record.value)),
+    ),
+  )
+  $('#database-detail-edit', dialog)?.addEventListener('click', () => {
+    dialog.close()
+    databaseEditor(table, record)
+  })
+}
+async function databaseEdit(key) {
+  const table = state.database.table
+  databaseEditable(table)
+  databaseEditor(table, await databaseRecord(table, key))
+}
+function databaseEditor(table, record = null) {
+  databaseEditable(table)
+  const sample = record ?? databaseTemplate(table)
+  const editorState = {
+    revision: record?.revision,
+    conflict: false,
+    preservedDraft: null,
+  }
+  const dialog = showDialog(
+    record ? '编辑测试记录' : '新增测试记录',
+    `<p class="muted">数据表：${h(databaseTable(table)?.label ?? table)} <code>${h(table)}</code>${record ? ` · 当前版本 ${h(record.revision)}` : ''}</p><p class="callout">JSON 必须是对象。存储键需与商户号和业务单号等身份字段一致；复制样例时，请一并修改这些字段。直接写记录不会更新关联资金或业务状态。</p><form id="database-record-form">${field('database-record-key', '存储键', sample.key, { required: true, hint: record ? '现有记录的存储键不可修改；更换身份请新增记录。' : '填写新的唯一存储键，已有键不会被覆盖。' })}${field('database-record-value', '记录内容 JSON', jsonText(sample.value), { type: 'textarea', rows: 20 })}<div id="database-editor-message" role="status" aria-live="polite"></div><div class="actions"><button type="submit" class="button primary" id="database-record-save">${record ? '保存修改' : '新增记录'}</button><button type="button" class="button" id="database-draft-copy">复制当前草稿</button></div></form><div id="database-conflict-panel"></div>`,
+  )
+  const keyInput = $('#database-record-key', dialog),
+    valueInput = $('#database-record-value', dialog),
+    save = $('#database-record-save', dialog)
+  keyInput.readOnly = Boolean(record)
+  $('#database-draft-copy', dialog).addEventListener('click', () =>
+    busy($('#database-draft-copy', dialog), () => copy(valueInput.value)),
+  )
+  $('#database-record-form', dialog).addEventListener(
+    'submit',
+    async (event) => {
+      event.preventDefault()
+      if (editorState.conflict) return
+      await busy(save, async () => {
+        const key = keyInput.value,
+          value = parseObject(valueInput.value, '记录内容 JSON')
+        if (!key.trim()) throw new Error('存储键必填')
+        try {
+          await request(databasePath(table, record ? 'record' : 'records'), {
+            method: record ? 'PUT' : 'POST',
+            body: JSON.stringify({
+              key,
+              value,
+              ...(record ? { revision: editorState.revision } : {}),
+            }),
+          })
+        } catch (error) {
+          if (record && error.status === 409) {
+            editorState.conflict = true
+            $('#database-editor-message', dialog).innerHTML =
+              '<p class="callout error">记录已被其他操作修改，本次保存未写入。当前草稿已保留。重新加载最新记录后，比较并合并你的修改。</p>'
+            $('#database-conflict-panel', dialog).innerHTML =
+              '<div class="actions"><button type="button" class="button" id="database-conflict-reload">重新加载最新记录（保留原草稿）</button></div>'
+            $('#database-conflict-reload', dialog).addEventListener(
+              'click',
+              (reloadEvent) =>
+                busy(reloadEvent.currentTarget, async () => {
+                  const latestRecord = await databaseRecord(table, record.key)
+                  editorState.preservedDraft = valueInput.value
+                  editorState.revision = latestRecord.revision
+                  editorState.conflict = false
+                  valueInput.value = jsonText(latestRecord.value)
+                  $('#database-editor-message', dialog).innerHTML =
+                    `<p class="callout success">已加载最新版本 ${h(latestRecord.revision)}，请核对后再保存。原草稿保留在下方。</p>`
+                  $('#database-conflict-panel', dialog).innerHTML =
+                    `<details open><summary>冲突前的草稿（仅供比较和复制）</summary>${field('database-preserved-draft', '原始 JSON 草稿', editorState.preservedDraft, { type: 'textarea', rows: 12 })}<button type="button" class="button" id="database-preserved-copy">复制冲突前草稿</button></details>`
+                  $('#database-preserved-draft', dialog).readOnly = true
+                  $('#database-preserved-copy', dialog).addEventListener(
+                    'click',
+                    () =>
+                      busy($('#database-preserved-copy', dialog), () =>
+                        copy(editorState.preservedDraft),
+                      ),
+                  )
+                  save.disabled = false
+                }),
+            )
+            return
+          }
+          throw error
+        }
+        dialog.close()
+        toast(record ? '测试记录已更新' : '测试记录已新增；可用存储键搜索查看')
+        await databaseMutationRefresh()
+      })
+      if (editorState.conflict) save.disabled = true
+    },
+  )
+  return dialog
+}
+async function databaseDelete(key) {
+  const table = state.database.table
+  databaseEditable(table)
+  let record = await databaseRecord(table, key)
+  const dialog = showDialog(
+    '确认删除测试记录',
+    `<p>将从 <strong>${h(databaseTable(table)?.label ?? table)}</strong> <code>${h(table)}</code> 删除以下记录：</p><p class="database-delete-key"><code>${h(record.key)}</code></p><p class="muted">删除不会回退资金、处理关联单据或触发回调。</p><div id="database-delete-preview">${jsonBlock(record.value)}</div><div id="database-delete-message" role="status" aria-live="polite"></div>`,
+    '<button type="button" class="button" data-dialog-close>取消</button><button type="button" class="button danger" id="database-delete-confirm">确认删除</button>',
+  )
+  const confirm = $('#database-delete-confirm', dialog)
+  let conflicted = false
+  confirm.addEventListener('click', async () => {
+    if (conflicted) return
+    await busy(confirm, async () => {
+      try {
+        await request(
+          databasePath(table, 'record', {
+            key: record.key,
+            revision: record.revision,
+          }),
+          { method: 'DELETE' },
+        )
+      } catch (error) {
+        if (error.status === 409) {
+          conflicted = true
+          $('#database-delete-message', dialog).innerHTML =
+            '<p class="callout error">记录已变更，本次删除未执行。请重新加载并核对最新内容。</p><button type="button" class="button" id="database-delete-reload">重新加载最新记录</button>'
+          $('#database-delete-reload', dialog).addEventListener(
+            'click',
+            (reloadEvent) =>
+              busy(reloadEvent.currentTarget, async () => {
+                record = await databaseRecord(table, record.key)
+                $('#database-delete-preview', dialog).innerHTML = jsonBlock(
+                  record.value,
+                )
+                $('#database-delete-message', dialog).innerHTML =
+                  `<p class="callout">已加载最新版本 ${h(record.revision)}，核对后可以再次确认删除。</p>`
+                conflicted = false
+                confirm.disabled = false
+              }),
+          )
+          return
+        }
+        throw error
+      }
+      dialog.close()
+      toast('测试记录已删除')
+      await databaseMutationRefresh()
+    })
+    if (conflicted) confirm.disabled = true
+  })
+}
+
 function renderSettings() {
   content.innerHTML = `<div id="settings-status"></div><div class="grid-2">
     ${panel('运行模式', `<form id="config-form"><div class="form-grid">${field('config-strict', '严格验证 APIv3 签名', state.config.strict, { type: 'checkbox', hint: '网页可自动签名；你的业务系统需使用测试证书和密钥。' })}${field('config-autoPay', '下单后自动支付', state.config.autoPay, { type: 'checkbox', hint: '关闭时可在业务数据中手动模拟支付。' })}${field('config-autoComplete', '自动完成退款、分账、提现及审核', state.config.autoComplete, { type: 'checkbox', wide: true })}${field('config-serviceNotifyUrl', '服务级通知地址', state.config.serviceNotifyUrl, { wide: true, placeholder: `${location.origin}/mock/receiver`, hint: '退款、分账等未指定回调地址时使用。' })}</div><div class="actions"><button type="submit" class="button primary">保存运行设置</button>${button('填入本地接收器', 'config-local')}</div></form>`)}
@@ -1784,7 +2189,27 @@ content.addEventListener('click', (event) => {
         state.snapshot[state.table] ?? {},
         `mock-${state.table}-${localDate()}.json`,
       )
-    else if (action === 'notification-detail')
+    else if (action === 'database-reload') await loadDatabase()
+    else if (action === 'database-create') databaseEditor(state.database.table)
+    else if (action === 'database-detail')
+      await databaseDetail(element.dataset.key)
+    else if (action === 'database-edit') await databaseEdit(element.dataset.key)
+    else if (action === 'database-delete')
+      await databaseDelete(element.dataset.key)
+    else if (action === 'database-search-reset') {
+      state.database.searchInput = ''
+      $('#database-search').value = ''
+      await searchDatabase()
+    } else if (action === 'database-page') {
+      const page = Number(element.dataset.page)
+      const pages = Math.max(
+        1,
+        Math.ceil(state.database.total / state.database.pageSize),
+      )
+      if (!Number.isInteger(page) || page < 1 || page > pages) return
+      state.database.page = page
+      await loadDatabase({ metadata: false })
+    } else if (action === 'notification-detail')
       showRecord('notifications', element.dataset.id)
     else if (action === 'notification-retry') {
       await request(
@@ -1862,6 +2287,20 @@ content.addEventListener('input', (event) => {
     state.recordFilter = input.value
     renderRecordRows()
   }
+  if (input.id === 'database-search') {
+    const database = state.database
+    database.searchInput = input.value
+    database.sequence += 1
+    clearTimeout(database.searchTimer)
+    database.searchTimer = setTimeout(() => {
+      database.search = database.searchInput
+      database.page = 1
+      if (state.view === 'database')
+        loadDatabase({ metadata: false }).catch((error) =>
+          toast(error.message, true),
+        )
+    }, 300)
+  }
   if (input.dataset.draftField) {
     const draft = scenarioDraft()
     const bodyField = input.dataset.source === 'scenario-body',
@@ -1930,6 +2369,22 @@ content.addEventListener('change', (event) => {
     state.table = input.value
     renderRecordRows()
   }
+  if (input.id === 'database-table') {
+    state.database.table = input.value
+    state.database.page = 1
+    state.database.items = []
+    renderDatabaseControls()
+    loadDatabase({ metadata: false }).catch((error) =>
+      toast(error.message, true),
+    )
+  }
+  if (input.id === 'database-page-size') {
+    state.database.pageSize = Number(input.value)
+    state.database.page = 1
+    loadDatabase({ metadata: false }).catch((error) =>
+      toast(error.message, true),
+    )
+  }
   if (input.id === 'notification-filter') {
     state.notificationFilter = input.value
     renderNotificationRows()
@@ -1940,7 +2395,10 @@ content.addEventListener('submit', (event) => {
   const form = event.target,
     submit = $('button[type="submit"]', form)
   busy(submit, async () => {
-    if (form.id === 'scenario-form') {
+    if (form.id === 'database-query-form') {
+      state.database.searchInput = $('#database-search').value
+      await searchDatabase()
+    } else if (form.id === 'scenario-form') {
       const input = readScenario(),
         response = await execute(input.method, input.path, input.body)
       showResponse('#scenario-response', response, 'scenario')

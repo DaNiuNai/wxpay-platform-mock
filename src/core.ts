@@ -99,6 +99,7 @@ export class Runtime {
   readonly routes: { method: string; path: string }[] = []
   private queue = Promise.resolve()
   private callbackRunning = false
+  private callbacksStopped = false
 
   constructor(
     readonly app: Hono,
@@ -280,6 +281,7 @@ export class Runtime {
   }
 
   async flushCallbacks(): Promise<Data> {
+    if (this.callbacksStopped) return { delivered: 0, stopped: true }
     if (this.callbackRunning) return { delivered: 0, running: true }
     this.callbackRunning = true
     let delivered = 0
@@ -291,17 +293,25 @@ export class Runtime {
             item.status === 'PENDING' && item.next_attempt_at <= Date.now(),
         )
       for (const candidate of pending) {
-        const item = await this.exclusive(async () => {
+        if (this.callbacksStopped) break
+        const pendingDelivery = await this.exclusive(async () => {
+          if (this.callbacksStopped) return undefined
           const current = this.store.get<Notification>(
             'notifications',
             candidate.id,
           )
           return current?.status === 'PENDING' &&
             current.next_attempt_at <= Date.now()
-            ? structuredClone(current)
+            ? {
+                item: structuredClone(current),
+                revision:
+                  this.store.record('notifications', current.id)?.revision ??
+                  null,
+              }
             : undefined
         })
-        if (!item) continue
+        if (!pendingDelivery) continue
+        const { item, revision } = pendingDelivery
         let status: number | undefined
         let error: string | undefined
         try {
@@ -324,8 +334,16 @@ export class Runtime {
           error = cause instanceof Error ? cause.message : String(cause)
         }
         await this.exclusive(async () => {
+          if (this.callbacksStopped) return
           const current = this.store.get<Notification>('notifications', item.id)
           if (!current || current.status !== 'PENDING') return
+          if (
+            (revision !== null &&
+              this.store.record('notifications', item.id)?.revision !==
+                revision) ||
+            canonical(current) !== canonical(item)
+          )
+            return
           current.attempts += 1
           current.last_status = status
           current.last_error = error
@@ -342,13 +360,19 @@ export class Runtime {
       }
       return {
         delivered,
-        pending: this.store
-          .values<Notification>('notifications')
-          .filter((item) => item.status === 'PENDING').length,
+        pending: this.callbacksStopped
+          ? 0
+          : this.store
+              .values<Notification>('notifications')
+              .filter((item) => item.status === 'PENDING').length,
       }
     } finally {
       this.callbackRunning = false
     }
+  }
+
+  stopCallbacks(): void {
+    this.callbacksStopped = true
   }
 
   consumeFault(method: string, path: string): Fault | undefined {

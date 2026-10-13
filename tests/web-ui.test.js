@@ -43,7 +43,7 @@ class Element {
     this._html = value
     this.children = []
     for (const match of value.matchAll(
-      /<(input|textarea|select|button|form|div|aside|section|dialog|nav|span)\b([^>]*)>(?:([^<]*)<\/textarea>)?/g,
+      /<(input|textarea|select|button|form|div|aside|section|dialog|nav|span|p)\b([^>]*)>(?:([^<]*)<\/textarea>)?/g,
     )) {
       const attrs = Object.fromEntries(
         [...match[2].matchAll(/([\w-]+)(?:="([^"]*)")?/g)].map((item) => [
@@ -52,6 +52,9 @@ class Element {
         ]),
       )
       const child = new Element(match[1], attrs, this.owner)
+      child._html = value
+        .slice(match.index + match[0].length)
+        .split(`</${child.tag}>`)[0]
       if (child.tag === 'textarea') child.value = decode(match[3] ?? '')
       if (child.tag === 'select') {
         const remainder = value
@@ -76,6 +79,7 @@ class Element {
   }
   remove() {
     this.removed = true
+    this.children = []
   }
   addEventListener(type, callback) {
     this.events.set(type, callback)
@@ -95,6 +99,9 @@ class Element {
       attribute[2] in this.attrs &&
       (attribute[3] === undefined || this.attrs[attribute[2]] === attribute[3]),
     )
+  }
+  closest(selector) {
+    return this.matches(selector) ? this : null
   }
   querySelectorAll(selector) {
     return this.owner.nodes().filter((node) => node.matches(selector))
@@ -152,6 +159,7 @@ async function fixture() {
     'scenarios',
     'workbench',
     'records',
+    'database',
     'notifications',
     'settings',
   ])
@@ -181,14 +189,125 @@ async function fixture() {
   }
   const calls = [],
     downloads = [],
-    hooks = { onProxy: null }
+    hooks = { onProxy: null, databaseResponse: null }
   const ok = (data, status = 200) =>
     new Response(data === undefined ? null : JSON.stringify(data), {
       status,
       headers: { 'Content-Type': 'application/json' },
     })
+  const databaseRecords = new Map()
+  const databaseTables = [
+    { name: 'orders', label: '支付订单', editable: true },
+    { name: 'accounts', label: '资金账户', editable: true },
+    { name: 'merchants', label: '二级商户', editable: true },
+    { name: 'requests', label: '请求日志', editable: false },
+    { name: 'meta', label: '系统元数据', editable: false },
+  ]
+  const seedRecord = (table, key, value) => {
+    if (!databaseRecords.has(table)) databaseRecords.set(table, new Map())
+    const records = databaseRecords.get(table)
+    const previous = records.get(key)
+    const record = {
+      key,
+      value: structuredClone(value),
+      revision: (previous?.revision ?? 0) + 1,
+      created_at: previous?.created_at ?? '2026-10-13T08:00:00Z',
+      updated_at: '2026-10-13T08:01:00Z',
+    }
+    records.set(key, record)
+    snapshot[table] ??= {}
+    snapshot[table][key] = structuredClone(value)
+    return record
+  }
+  for (const [table, entries] of Object.entries(snapshot))
+    for (const [key, value] of Object.entries(entries))
+      seedRecord(table, key, value)
+  seedRecord('meta', 'seeded', { seeded: true })
   const fetch = async (path, options = {}) => {
     calls.push({ path, options })
+    const url = new URL(path, config.baseUrl)
+    if (url.pathname === '/mock/database')
+      return ok({
+        info: {
+          engine: 'sqlite',
+          mode: 'memory',
+          path: null,
+          schemaVersion: 1,
+          sqliteVersion: '3.51.0',
+          journalMode: 'memory',
+          legacyImported: false,
+          recordCount: [...databaseRecords.values()].reduce(
+            (sum, records) => sum + records.size,
+            0,
+          ),
+        },
+        tables: databaseTables.map((table) => ({
+          ...table,
+          count: databaseRecords.get(table.name)?.size ?? 0,
+        })),
+      })
+    if (url.pathname.startsWith('/mock/database/')) {
+      const intercepted = await hooks.databaseResponse?.(url, options)
+      if (intercepted) return intercepted
+      const [, , , table, resource] = url.pathname.split('/')
+      const records = databaseRecords.get(table) ?? new Map()
+      const method = options.method ?? 'GET'
+      if (
+        method !== 'GET' &&
+        !databaseTables.find((item) => item.name === table)?.editable
+      )
+        return ok({ code: 'NO_AUTH', message: '内部表只允许查看' }, 403)
+      if (method === 'GET' && resource === 'records') {
+        const search = url.searchParams.get('search') ?? '',
+          page = Number(url.searchParams.get('page') ?? 1),
+          pageSize = Number(url.searchParams.get('pageSize') ?? 25)
+        const rows = [...records.values()].filter((record) =>
+          `${record.key} ${JSON.stringify(record.value)}`.includes(search),
+        )
+        return ok({
+          items: rows.slice((page - 1) * pageSize, page * pageSize),
+          total: rows.length,
+          page,
+          pageSize,
+        })
+      }
+      const input = options.body ? JSON.parse(options.body) : {}
+      const key =
+        method === 'GET' || method === 'DELETE'
+          ? url.searchParams.get('key')
+          : input.key
+      const record = records.get(key)
+      if (method === 'POST') {
+        if (record)
+          return ok(
+            { code: 'RESOURCE_ALREADY_EXISTS', message: '存储键已存在' },
+            409,
+          )
+        seedRecord(table, key, input.value)
+        return ok({ key, value: input.value }, 201)
+      }
+      if (!record)
+        return ok({ code: 'RESOURCE_NOT_EXISTS', message: '记录不存在' }, 404)
+      if (method === 'GET') return ok(record)
+      const revision =
+        method === 'DELETE'
+          ? Number(url.searchParams.get('revision'))
+          : input.revision
+      if (record.revision !== revision)
+        return ok(
+          { code: 'CONFLICT', message: '记录已变更，请加载最新版本' },
+          409,
+        )
+      if (method === 'PUT') {
+        seedRecord(table, key, input.value)
+        return ok({ key, value: input.value })
+      }
+      if (method === 'DELETE') {
+        records.delete(key)
+        delete snapshot[table][key]
+        return ok(undefined, 204)
+      }
+    }
     if (path === '/mock/state') return ok(snapshot)
     if (path === '/mock/config') return ok(config)
     if (path === '/mock/apis')
@@ -280,6 +399,8 @@ async function fixture() {
     throw new Error(`测试未模拟请求 ${path}`)
   }
   const location = { origin: config.baseUrl, hash: '' }
+  const scheduled = new Map()
+  let nextTimer = 0
   const context = {
     ...helpers,
     h: helpers.escapeHtml,
@@ -308,8 +429,13 @@ async function fixture() {
     FormData,
     atob,
     structuredClone,
-    setTimeout() {
-      return 1
+    setTimeout(callback, delay) {
+      const id = ++nextTimer
+      scheduled.set(id, { callback, delay })
+      return id
+    },
+    clearTimeout(id) {
+      scheduled.delete(id)
     },
     setInterval() {
       return 1
@@ -320,12 +446,29 @@ async function fixture() {
     'utf8',
   ).replace(/^import\s*\{[^}]*\}\s*from\s*(['"])[^'"\r\n]+\1;?[ \t]*\r?$/gm, '')
   vm.runInNewContext(
-    `${code}\nglobalThis.ui = { state, navigate, refresh, selectContract, readWorkbench, scenarioDraft, runFlow };`,
+    `${code}\nglobalThis.ui = { state, navigate, refresh, selectContract, readWorkbench, scenarioDraft, runFlow, loadDatabase, databaseEditor, databaseEdit, databaseDelete, databaseDetail };`,
     context,
     { filename: 'app.js' },
   )
   await new Promise((resolve) => setImmediate(resolve))
-  return { document, ui: context.ui, calls, downloads, config, snapshot, hooks }
+  return {
+    document,
+    ui: context.ui,
+    calls,
+    downloads,
+    config,
+    snapshot,
+    hooks,
+    databaseRecords,
+    seedRecord,
+    flushSearch() {
+      for (const [id, timer] of scheduled)
+        if (timer.delay === 300) {
+          scheduled.delete(id)
+          timer.callback()
+        }
+    },
+  }
 }
 
 test('控制台模块读取真实接口目录，六个页面可初始化且全部接口路径可选', async () => {
@@ -492,4 +635,323 @@ test('合单列表汇总子订单金额和真实状态，支付后隐藏再次�
   assert.match(html, /REFUND/)
   assert.match(html, /¥12\.00/)
   assert.ok(!html.includes('data-operation="combine-pay"'))
+})
+
+const settle = () => new Promise((resolve) => setImmediate(resolve))
+async function openDatabase(fixture) {
+  fixture.ui.navigate('database')
+  await settle()
+  assert.equal(fixture.ui.state.database.loading, false)
+}
+async function databaseTableChange(fixture, table) {
+  const picker = fixture.document.querySelector('#database-table')
+  picker.value = table
+  fixture.document.querySelector('#content').events.get('change')({
+    target: picker,
+  })
+  await settle()
+}
+async function databaseClick(fixture, action, key) {
+  const element = fixture.document
+    .nodes()
+    .find(
+      (node) =>
+        node.dataset.action === action &&
+        (key === undefined || node.dataset.key === key),
+    )
+  assert.ok(element, `找不到数据库操作 ${action}`)
+  fixture.document.querySelector('#content').events.get('click')({
+    target: element,
+  })
+  await settle()
+}
+async function databaseSubmit(fixture) {
+  const form = fixture.document.querySelector('#database-record-form')
+  await form.events.get('submit')({ preventDefault() {}, target: form })
+  await settle()
+}
+
+test('数据库页面新增、编辑、确认删除测试记录，并刷新业务状态', async () => {
+  const f = await fixture()
+  await openDatabase(f)
+  await databaseTableChange(f, 'accounts')
+  await databaseClick(f, 'database-create')
+  const key = '1900000200:BASIC'
+  assert.equal(f.document.querySelector('#database-record-key').value, key)
+  f.document.querySelector('#database-record-value').value = '[]'
+  await databaseSubmit(f)
+  assert.equal(
+    f.calls.some(
+      (call) =>
+        call.options.method === 'POST' && call.path.includes('/mock/database/'),
+    ),
+    false,
+  )
+  f.document.querySelector('#database-record-value').value = JSON.stringify({
+    mchid: '1900000200',
+    account_type: 'BASIC',
+    available: 12000,
+    frozen: 0,
+  })
+  await databaseSubmit(f)
+  assert.equal(
+    f.databaseRecords.get('accounts').get(key).value.available,
+    12000,
+  )
+  assert.equal(f.ui.state.snapshot.accounts[key].available, 12000)
+  await databaseClick(f, 'database-edit', key)
+  assert.equal(f.document.querySelector('#database-record-key').readOnly, true)
+  const edited = JSON.parse(
+    f.document.querySelector('#database-record-value').value,
+  )
+  edited.available = 24000
+  f.document.querySelector('#database-record-value').value =
+    JSON.stringify(edited)
+  await databaseSubmit(f)
+  const put = f.calls.find(
+    (call) =>
+      call.options.method === 'PUT' && call.path.includes('/mock/database/'),
+  )
+  assert.equal(JSON.parse(put.options.body).revision, 1)
+  assert.equal(f.databaseRecords.get('accounts').get(key).revision, 2)
+  await databaseClick(f, 'database-delete', key)
+  assert.equal(
+    f.calls.some((call) => call.options.method === 'DELETE'),
+    false,
+  )
+  assert.match(
+    f.document.querySelector('#database-delete-preview').innerHTML,
+    /24000/,
+  )
+  const confirm = f.document.querySelector('#database-delete-confirm')
+  await confirm.events.get('click')({ currentTarget: confirm })
+  assert.equal(f.databaseRecords.get('accounts').has(key), false)
+  assert.equal(f.ui.state.snapshot.accounts[key], undefined)
+  const deleted = f.calls.find((call) => call.options.method === 'DELETE')
+  assert.equal(
+    new URL(deleted.path, f.config.baseUrl).searchParams.get('key'),
+    key,
+  )
+  assert.equal(
+    new URL(deleted.path, f.config.baseUrl).searchParams.get('revision'),
+    '2',
+  )
+})
+
+test('数据库编辑冲突不会覆盖服务器内容，重新加载保留用户草稿和最新版本', async () => {
+  const f = await fixture(),
+    key = '1900000101:BASIC'
+  await openDatabase(f)
+  await databaseTableChange(f, 'accounts')
+  await databaseClick(f, 'database-edit', key)
+  const editor = f.document.querySelector('#database-record-value')
+  const draft = JSON.parse(editor.value)
+  draft.available = 50
+  editor.value = JSON.stringify(draft)
+  f.seedRecord('accounts', key, { ...draft, available: 900 })
+  await databaseSubmit(f)
+  assert.equal(f.databaseRecords.get('accounts').get(key).value.available, 900)
+  assert.equal(f.document.querySelector('#database-record-save').disabled, true)
+  assert.match(
+    f.document.querySelector('#database-editor-message').innerHTML,
+    /本次保存未写入/,
+  )
+  await f.ui.refresh()
+  assert.equal(f.document.querySelector('#database-record-value'), editor)
+  assert.equal(JSON.parse(editor.value).available, 50)
+  const reload = f.document.querySelector('#database-conflict-reload')
+  await reload.events.get('click')({ currentTarget: reload })
+  assert.equal(JSON.parse(editor.value).available, 900)
+  assert.equal(
+    JSON.parse(f.document.querySelector('#database-preserved-draft').value)
+      .available,
+    50,
+  )
+  assert.equal(
+    f.document.querySelector('#database-record-save').disabled,
+    false,
+  )
+  editor.value = JSON.stringify({ ...draft, available: 1000 })
+  await databaseSubmit(f)
+  const puts = f.calls.filter((call) => call.options.method === 'PUT')
+  assert.equal(JSON.parse(puts.at(-1).options.body).revision, 2)
+  assert.equal(f.databaseRecords.get('accounts').get(key).value.available, 1000)
+})
+
+test('数据库分页来自服务端 API，删除末页最后记录后回到有效页', async () => {
+  const f = await fixture()
+  for (let index = 0; index < 27; index++)
+    f.seedRecord('orders', `1900000101:ORDER${index}`, {
+      out_trade_no: `ORDER${index}`,
+      description: '分页测试订单',
+    })
+  await openDatabase(f)
+  assert.equal(f.ui.state.database.total, 27)
+  assert.equal(f.ui.state.database.items.length, 25)
+  const next = f.document
+    .nodes()
+    .find(
+      (node) =>
+        node.dataset.action === 'database-page' && node.dataset.page === '2',
+    )
+  f.document.querySelector('#content').events.get('click')({ target: next })
+  await settle()
+  assert.equal(f.ui.state.database.page, 2)
+  assert.equal(f.ui.state.database.items.length, 2)
+  for (const key of ['1900000101:ORDER25', '1900000101:ORDER26']) {
+    await databaseClick(f, 'database-delete', key)
+    const confirm = f.document.querySelector('#database-delete-confirm')
+    await confirm.events.get('click')({ currentTarget: confirm })
+  }
+  assert.equal(f.ui.state.database.page, 1)
+  assert.equal(f.ui.state.database.items.length, 25)
+  const lists = f.calls.filter((call) =>
+    call.path.includes('/mock/database/orders/records'),
+  )
+  assert.ok(
+    lists.some(
+      (call) =>
+        new URL(call.path, f.config.baseUrl).searchParams.get('page') === '2',
+    ),
+  )
+  assert.equal(
+    new URL(lists.at(-1).path, f.config.baseUrl).searchParams.get('page'),
+    '1',
+  )
+})
+
+test('数据库只读权限来自元数据，JSON 和特殊存储键安全显示并用查询参数传递', async () => {
+  const f = await fixture(),
+    key = '特殊:键/带"引号'
+  f.seedRecord('requests', key, {
+    method: 'POST',
+    description: '<img src=x onerror="alert(1)">',
+  })
+  await openDatabase(f)
+  await databaseTableChange(f, 'requests')
+  assert.equal(f.document.querySelector('#database-create').disabled, true)
+  const rows = f.document.querySelector('#database-results').innerHTML
+  assert.ok(!rows.includes('<img'))
+  assert.match(rows, /&lt;img/)
+  assert.ok(!rows.includes('data-action="database-edit"'))
+  assert.ok(!rows.includes('data-action="database-delete"'))
+  assert.throws(() => f.ui.databaseEditor('requests'), /只允许查看/)
+  await databaseClick(f, 'database-detail', key)
+  const detail = f.calls.find((call) =>
+    call.path.startsWith('/mock/database/requests/record?'),
+  )
+  assert.equal(
+    new URL(detail.path, f.config.baseUrl).searchParams.get('key'),
+    key,
+  )
+  assert.ok(detail.path.includes('%2F'))
+})
+
+test('数据库搜索防抖保留输入，较早请求的迟到应答不会覆盖较新结果', async () => {
+  const f = await fixture()
+  f.seedRecord('orders', 'slow', { marker: 'slow' })
+  f.seedRecord('orders', 'fast', { marker: 'fast' })
+  await openDatabase(f)
+  const search = f.document.querySelector('#database-search'),
+    content = f.document.querySelector('#content')
+  const previousCalls = f.calls.filter((call) =>
+    call.path.includes('/mock/database/orders/records'),
+  ).length
+  for (const value of ['f', 'fa', 'fast']) {
+    search.value = value
+    content.events.get('input')({ target: search })
+  }
+  assert.equal(
+    f.calls.filter((call) =>
+      call.path.includes('/mock/database/orders/records'),
+    ).length,
+    previousCalls,
+  )
+  f.flushSearch()
+  await settle()
+  assert.equal(
+    f.calls.filter((call) =>
+      call.path.includes('/mock/database/orders/records'),
+    ).length,
+    previousCalls + 1,
+  )
+  assert.equal(f.ui.state.database.items[0].key, 'fast')
+  assert.equal(f.document.querySelector('#database-search'), search)
+  let resolveSlow
+  const delayed = new Promise((resolve) => {
+    resolveSlow = resolve
+  })
+  f.hooks.databaseResponse = (url) =>
+    url.searchParams.get('search') === 'slow' ? delayed : undefined
+  f.ui.state.database.search = 'slow'
+  const slowRequest = f.ui.loadDatabase({ metadata: false })
+  f.ui.state.database.search = 'fast'
+  await f.ui.loadDatabase({ metadata: false })
+  resolveSlow(
+    new Response(
+      JSON.stringify({
+        items: [f.databaseRecords.get('orders').get('slow')],
+        total: 1,
+        page: 1,
+        pageSize: 25,
+      }),
+      { headers: { 'Content-Type': 'application/json' } },
+    ),
+  )
+  await slowRequest
+  assert.equal(f.ui.state.database.items[0].key, 'fast')
+  assert.equal(f.ui.state.database.loading, false)
+})
+
+test('数据库删除冲突保持记录，重新核对最新版本后才允许再次确认', async () => {
+  const f = await fixture(),
+    key = '1900000101:BASIC'
+  await openDatabase(f)
+  await databaseTableChange(f, 'accounts')
+  await databaseClick(f, 'database-delete', key)
+  f.seedRecord('accounts', key, {
+    mchid: '1900000101',
+    account_type: 'BASIC',
+    available: 99,
+    frozen: 0,
+  })
+  const confirm = f.document.querySelector('#database-delete-confirm')
+  await confirm.events.get('click')({ currentTarget: confirm })
+  assert.equal(f.databaseRecords.get('accounts').has(key), true)
+  assert.equal(confirm.disabled, true)
+  assert.match(
+    f.document.querySelector('#database-delete-message').innerHTML,
+    /本次删除未执行/,
+  )
+  const reload = f.document.querySelector('#database-delete-reload')
+  await reload.events.get('click')({ currentTarget: reload })
+  assert.equal(confirm.disabled, false)
+  assert.match(
+    f.document.querySelector('#database-delete-preview').innerHTML,
+    /99/,
+  )
+  await confirm.events.get('click')({ currentTarget: confirm })
+  assert.equal(f.databaseRecords.get('accounts').has(key), false)
+})
+
+test('数据库元信息按北京时间跨日显示，记录中的原始 UTC JSON 保持不变', async () => {
+  const f = await fixture()
+  const created = '2026-10-13T15:59:59Z',
+    updated = '2026-10-13T16:00:01Z'
+  const record = f.seedRecord('requests', 'timezone-test', { time: updated })
+  record.created_at = created
+  record.updated_at = updated
+  await openDatabase(f)
+  await databaseTableChange(f, 'requests')
+  const rows = f.document.querySelector('#database-results').innerHTML
+  assert.match(rows, /最后更新（北京时间）/)
+  assert.match(rows, /2026-10-14 00:00:01/)
+  await databaseClick(f, 'database-detail', 'timezone-test')
+  const dialog = f.document.nodes().find((node) => node.tag === 'dialog')
+  assert.match(dialog.innerHTML, /2026-10-13 23:59:59/)
+  assert.match(dialog.innerHTML, /2026-10-14 00:00:01/)
+  assert.match(dialog.innerHTML, /2026-10-13T16:00:01Z/)
+  assert.equal(record.created_at, created)
+  assert.equal(record.updated_at, updated)
+  assert.equal(record.value.time, updated)
 })
