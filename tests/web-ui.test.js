@@ -165,7 +165,7 @@ async function fixture() {
   ])
     nav.append(new Element('button', { 'data-view': view }, document))
   const config = {
-    baseUrl: 'http://127.0.0.1:3000',
+    baseUrl: 'http://127.0.0.1:18397',
     spMchid: '1900000100',
     spAppid: 'wx_mock_platform',
     subMchid: '1900000101',

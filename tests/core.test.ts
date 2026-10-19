@@ -9,10 +9,10 @@ import {
   X509Certificate,
 } from 'node:crypto'
 import { createServer } from 'node:http'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { resolve, join } from 'node:path'
 import { createApp } from '../src/app.js'
-import type { Data } from '../src/types.js'
+import type { Data, MockConfig } from '../src/types.js'
 import type { Notification } from '../src/core.js'
 import { validateFields } from '../src/validation.js'
 
@@ -50,6 +50,30 @@ function verified(
     Buffer.from(headers.get('Wechatpay-Signature')!, 'base64'),
   )
 }
+
+test('默认端口与配置示例使用一致的本地服务地址', async () => {
+  const instance = createApp({ callbacks: false })
+  try {
+    const response = await instance.app.request('/mock/config')
+    assert.equal(response.status, 200)
+    const config = (await response.json()) as MockConfig
+    assert.equal(config.port, 18397)
+    assert.equal(config.baseUrl, 'http://127.0.0.1:18397')
+    assert.equal(new URL(config.baseUrl).port, String(config.port))
+
+    const example = JSON.parse(
+      readFileSync(
+        new URL('../mock.config.example.json', import.meta.url),
+        'utf8',
+      ),
+    ) as MockConfig
+    assert.equal(example.host, config.host)
+    assert.equal(example.port, config.port)
+    assert.equal(example.baseUrl, config.baseUrl)
+  } finally {
+    instance.close()
+  }
+})
 
 test('本地文档的全部74个服务端方法/路径均已注册', async () => {
   const instance = createApp({ callbacks: false })

@@ -44,8 +44,8 @@ export function int(data: Data, key: string, min = 0): number {
 
 export const defaults: MockConfig = {
   host: '127.0.0.1',
-  port: 3000,
-  baseUrl: 'http://127.0.0.1:3000',
+  port: 18397,
+  baseUrl: 'http://127.0.0.1:18397',
   spMchid: '1900000100',
   spAppid: 'wx_mock_platform',
   subMchid: '1900000101',

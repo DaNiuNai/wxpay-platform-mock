@@ -13,7 +13,7 @@ import type { Data } from '../src/types.js'
 
 const args = process.argv.slice(2)
 const base = (
-  args.find((arg) => arg.startsWith('http')) ?? 'http://127.0.0.1:3000'
+  args.find((arg) => arg.startsWith('http')) ?? 'http://127.0.0.1:18397'
 ).replace(/\/$/, '')
 const strict = args.includes('--strict')
 const keyIndex = args.indexOf('--key')

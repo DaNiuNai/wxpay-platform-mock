@@ -11,11 +11,11 @@ pnpm install
 pnpm dev
 ```
 
-服务地址为 `http://127.0.0.1:3000`。默认宽松模式，无需 Authorization；仍然校验必填参数、类型、金额、状态、商户归属和业务单号。所有官方 JSON 应答、错误和通知都带真实 RSA 签名。
+服务地址为 `http://127.0.0.1:18397`。默认宽松模式，无需 Authorization；仍然校验必填参数、类型、金额、状态、商户归属和业务单号。所有官方 JSON 应答、错误和通知都带真实 RSA 签名。
 
 ## 网页控制台
 
-启动后在浏览器打开 **http://127.0.0.1:3000/**（或 `/console`），即可操作本地控制台，无需额外前端服务或联网下载网页资源。原服务信息 JSON 改在 `GET /mock/info`。
+启动后在浏览器打开 **http://127.0.0.1:18397/**（或 `/console`），即可操作本地控制台，无需额外前端服务或联网下载网页资源。原服务信息 JSON 改在 `GET /mock/info`。
 
 - **联调总览**：查看订单、交易金额、资金账户、回调送达情况；从最近订单直接模拟支付。
 - **场景模拟**：选择普通/合单支付、退款、分账、进件、补差、提现、跨境、账单等预置，修改表单和高级 JSON；运行完整交易链路，每一步都展示真实 HTTP 响应。
@@ -40,10 +40,12 @@ pnpm start
 
 ```powershell
 pnpm dev -- --memory
-pnpm dev -- --port 3001 --data-dir data-other
+pnpm dev -- --port 18398 --data-dir data-other
 Copy-Item mock.config.example.json mock.config.json
 pnpm dev -- --config mock.config.json
 ```
+
+默认端口为 `18397`；`--port` 可覆盖端口并自动更新 `baseUrl`。使用 JSON 配置时，`port` 与 `baseUrl` 中的端口应保持一致。
 
 只读取命令行指定的 JSON 配置，不读取环境变量或 `.env` 文件。开发模式文件监听重启会保留磁盘状态。`--memory` 每次重启清空状态和测试密钥。
 
@@ -55,7 +57,7 @@ pnpm dev -- --config mock.config.json
 
 存储结构包含 `buckets`（逻辑业务表）、`records`（逐条业务记录）和 `storage_meta`（结构版本、迁移标记、版本计数）。记录保存业务存储键、JSON 内容、版本、创建/更新时间及顺序。网页中的“支付订单”“资金账户”等对应逻辑表；分页和搜索直接由 SQLite 查询执行。
 
-启动后打开 **http://127.0.0.1:3000/#database**：
+启动后打开 **http://127.0.0.1:18397/#database**：
 
 1. 选择数据表，输入存储键或 JSON 内容关键字，每页选择 25、50 或 100 条。
 2. 点击“详情”查看完整记录；在可编辑表中点击“新增记录”或“编辑”，填写业务键和 JSON 对象。
@@ -85,6 +87,12 @@ pnpm dev -- --config mock.config.json
 pnpm smoke
 ```
 
+脚本默认访问 `http://127.0.0.1:18397`。若服务使用自定义端口，显式传入对应地址，例如：
+
+```powershell
+pnpm smoke -- http://127.0.0.1:18398
+```
+
 脚本执行下单 → 支付 → 100 分分账并解冻 → 200 分退款 → 200 分提现 → 下载 GZIP 账单并校验 SHA1，全程验证官方应答签名。每次使用新单号，不重置已有数据；业务通知发往内置 `/mock/receiver`。初始余额为零的二级商户完成后可用余额为 500 分。脚本也适用于 `autoComplete=false`。
 
 默认测试参数：
@@ -102,12 +110,12 @@ pnpm smoke
 
 ## 接入业务系统
 
-将业务系统或微信支付 SDK 的 API 基础地址替换为 `http://127.0.0.1:3000`，保留原 `/v3/...` 路径、参数和状态处理。通知地址可使用本机 HTTP 地址。JSAPI、APP、Native 的前端支付用控制接口模拟成功；H5 下单返回可直接打开的本地收银台。
+将业务系统或微信支付 SDK 的 API 基础地址替换为 `http://127.0.0.1:18397`，保留原 `/v3/...` 路径、参数和状态处理。通知地址可使用本机 HTTP 地址。JSAPI、APP、Native 的前端支付用控制接口模拟成功；H5 下单返回可直接打开的本地收银台。
 
 PowerShell 示例：
 
 ```powershell
-$base = 'http://127.0.0.1:3000'
+$base = 'http://127.0.0.1:18397'
 $body = @{
   sp_appid = 'wx_mock_platform'
   sp_mchid = '1900000100'
